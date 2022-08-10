@@ -11,6 +11,7 @@ from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -20,11 +21,12 @@ from apex.parallel import DistributedDataParallel as DDP
 from models.modeling import VisionTransformer, CONFIGS
 from utils.scheduler import WarmupLinearSchedule, WarmupCosineSchedule
 from utils.data_utils import get_loader
-from utils.dist_util import get_world_size
+#from utils.dist_util import get_world_size
 import torch.nn.functional as F
 
 from sklearn.metrics import roc_curve
 from sklearn.metrics import auc
+from sklearn.metrics import average_precision_score, accuracy_score
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +65,7 @@ def setup(args):
     config = CONFIGS[args.model_type]
 
     #num_classes = 10 if args.dataset == "cifar10" elif 100
-    if args.dataset == "cifar10":
-        num_classes = 10
-    elif args.dataset == "cifar10":
-        num_classes = 100
-    elif args.dataset == "chexpert":
-        num_classes = 14
-    elif args.dataset == "skin":
-        num_classes = 7
-    elif args.dataset == "skin_binary":
-        num_classes = 2
-    else:
-        raise NotImplementedError 
-
+    num_classes = 11
     model = VisionTransformer(config, args.img_size, zero_head=True, num_classes=num_classes)
     model.load_from(np.load(args.pretrained_dir))
     model.to(args.device)
@@ -104,6 +94,10 @@ def set_seed(args):
 def valid(args, model, writer, test_loader, global_step):
     # Validation!
     eval_losses = AverageMeter()
+    train_outputs_tool_list = []
+    train_labels_tool_list = []
+    train_scores_tool_list = []
+    train_loss_tool_list = []
 
     logger.info("***** Running Validation *****")
     logger.info("  Num steps = %d", len(test_loader))
@@ -121,36 +115,31 @@ def valid(args, model, writer, test_loader, global_step):
         batch = tuple(t.to(args.device) for t in batch)
         x, y = batch
         with torch.no_grad():
-            logits = model(x)[0]
-
-            eval_loss = loss_fct(logits, y)
+            logits = model(x)
+            prob = torch.sigmoid(logits)
+            eval_loss = F.binary_cross_entropy(prob, y.float())
+            #eval_loss = loss_fct(logits, y)
             eval_losses.update(eval_loss.item())
+            train_outputs_tool_list.extend(prob.detach().cpu().numpy())
+            train_labels_tool_list.extend(y.detach().cpu().numpy())
 
-            preds = torch.argmax(logits, dim=-1)
 
-        if len(all_preds) == 0:
-            all_preds.append(preds.detach().cpu().numpy())
-            all_label.append(y.detach().cpu().numpy())
-        else:
-            all_preds[0] = np.append(
-                all_preds[0], preds.detach().cpu().numpy(), axis=0
-            )
-            all_label[0] = np.append(
-                all_label[0], y.detach().cpu().numpy(), axis=0
-            )
         epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
-
-    all_preds, all_label = all_preds[0], all_label[0]
-    accuracy = simple_accuracy(all_preds, all_label)
+    train_pred = average_precision_score(np.array(train_labels_tool_list), np.array(train_outputs_tool_list), average = None)
+    valid_mAP = np.nanmean(train_pred)
+    print(np.array(train_labels_tool_list).shape, np.array(train_scores_tool_list).shape)
+    #train_acc = accuracy_score(np.array(train_labels_tool_list), np.array(train_scores_tool_list))
+    train_mean_loss = np.mean(np.array(train_loss_tool_list))
 
     logger.info("\n")
     logger.info("Validation Results")
     logger.info("Global Steps: %d" % global_step)
     logger.info("Valid Loss: %2.5f" % eval_losses.avg)
-    logger.info("Valid Accuracy: %2.5f" % accuracy)
+    #logger.info("mAP: %2.5f, ACC:%2.5f" % (train_mAP, train_acc))
+    logger.info("mAP: %2.5f" % (valid_mAP))
 
-    #writer.add_scalar("test/accuracy",  global_step=global_step)
-    return eval_losses.avg, accuracy
+
+    return eval_losses.avg, valid_mAP
 
 
 def train(args, model):
@@ -182,16 +171,13 @@ def train(args, model):
         amp._amp_state.loss_scalers[0]._loss_scale = 2**20
 
     # Distributed training
-    if args.local_rank != -1:
-        model = DDP(model, message_size=250000000, gradient_predivide_factor=get_world_size())
+    # if args.local_rank != -1:
+    #     model = DDP(model, message_size=250000000, gradient_predivide_factor=get_world_size())
 
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Total optimization steps = %d", args.num_steps)
     logger.info("  Instantaneous batch size per GPU = %d", args.train_batch_size)
-    logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
-                args.train_batch_size * args.gradient_accumulation_steps * (
-                    torch.distributed.get_world_size() if args.local_rank != -1 else 1))
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
 
     model.zero_grad()
@@ -199,6 +185,7 @@ def train(args, model):
     losses = AverageMeter()
     global_step, best_acc = 0, 0
     best_global_step = 0
+    criterion_tool = nn.MultiLabelSoftMarginLoss()
     while True:
         model.train()
         epoch_iterator = tqdm(train_loader,
@@ -209,7 +196,9 @@ def train(args, model):
         for step, batch in enumerate(epoch_iterator):
             batch = tuple(t.to(args.device) for t in batch)
             x, y = batch
-            loss = model(x, y)
+            logits = model(x)
+            prob = torch.sigmoid(logits)
+            loss = F.binary_cross_entropy(prob, y.float())
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -237,10 +226,10 @@ def train(args, model):
                     writer.add_scalar("train/loss", scalar_value=losses.val, global_step=global_step)
                     writer.add_scalar("train/lr", scalar_value=scheduler.get_lr()[0], global_step=global_step)
                 if global_step % args.eval_every == 0 and args.local_rank in [-1, 0]:
-                    val_loss, accuracy = valid(args, model, writer, test_loader, global_step)
-                    if best_acc < accuracy:
+                    val_loss, mAP = valid(args, model, writer, test_loader, global_step)
+                    if best_acc < mAP:
                         save_model(args, model)
-                        best_acc = accuracy
+                        best_acc = mAP
                         best_global_step = global_step
                     logger.info("Best Global Steps: %d" % best_global_step)
                     model.train()
@@ -253,7 +242,7 @@ def train(args, model):
 
     if args.local_rank in [-1, 0]:
         writer.close()
-    logger.info("Best Accuracy: \t%f" % best_acc)
+    logger.info("Best mAP: \t%f" % best_acc)
     logger.info("End Training!")
 
 

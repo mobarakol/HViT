@@ -5,5 +5,5 @@ Training command:
 ```
 Validation Command:
 ```
-python valid.py --name skin_vit_slurm --model_type R50-ViT-B_16 --pretrained_dir output/skin_vit_319_checkpoint.bin --eval_batch_size 200
+python valid.py --pretrained_dir output/surgical_scene_vit_checkpoint.bin --eval_batch_size 200
 ```

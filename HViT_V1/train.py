@@ -152,6 +152,7 @@ def train(args, model):
 
     # Prepare datase
     train_loader, test_loader = get_loader(args)
+    print('Sample size: overal train={}, valid={}'.format(len(train_loader.dataset), len(test_loader.dataset)))
 
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
@@ -170,9 +171,6 @@ def train(args, model):
                                           opt_level=args.fp16_opt_level)
         amp._amp_state.loss_scalers[0]._loss_scale = 2**20
 
-    # Distributed training
-    # if args.local_rank != -1:
-    #     model = DDP(model, message_size=250000000, gradient_predivide_factor=get_world_size())
 
     # Train!
     logger.info("***** Running training *****")

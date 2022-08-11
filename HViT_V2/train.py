@@ -138,6 +138,7 @@ def train(args, model):
 
     # Prepare datase
     train_loader, test_loader = get_loader(args)
+    print('Sample size: overal train={}, valid={}'.format(len(train_loader.dataset), len(test_loader.dataset)))
     # Prepare optimizer and scheduler
     optimizer = torch.optim.SGD(model.parameters(),
                                 lr=args.learning_rate,

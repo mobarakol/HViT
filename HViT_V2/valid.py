@@ -60,10 +60,10 @@ def setup(args):
 def valid(args, model, test_loader):
     # Validation!
     eval_losses = AverageMeter()
-    train_outputs_tool_list = []
-    train_labels_tool_list = []
-    train_scores_tool_list = []
-    train_loss_tool_list = []
+    val_outputs_tool_list = []
+    val_labels_tool_list = []
+    val_scores_tool_list = []
+    val_loss_tool_list = []
 
     model.eval()
     epoch_iterator = tqdm(test_loader,
@@ -80,22 +80,26 @@ def valid(args, model, test_loader):
         with torch.no_grad():
             out = model(x)
             prob = torch.sigmoid(out)
-            eval_loss = F.binary_cross_entropy(prob, y)
+            eval_loss = F.binary_cross_entropy(prob, y.float())
             eval_losses.update(eval_loss.item())
-            train_outputs_tool_list.extend(prob.detach().cpu().numpy())
-            train_labels_tool_list.extend(y.detach().cpu().numpy())
+            val_outputs_tool_list.extend(prob.detach().cpu().numpy())
+            val_labels_tool_list.extend(y.detach().cpu().numpy())
+            scores_tool = torch.round(prob.data)
+            val_scores_tool_list.extend(scores_tool.detach().cpu().numpy())
 
         epoch_iterator.set_description("Validating... (loss=%2.5f)" % eval_losses.val)
     
-    train_pred = average_precision_score(np.array(train_labels_tool_list), np.array(train_outputs_tool_list), average = None)
-    valid_mAP = np.nanmean(train_pred)
+    val_pred = average_precision_score(np.array(val_labels_tool_list), np.array(val_outputs_tool_list), average = None)
+    valid_mAP = np.nanmean(val_pred)
     print('Validation mAP:', valid_mAP)
+    print(np.array(val_labels_tool_list).shape, np.array(val_scores_tool_list).shape)
+    valid_acc = accuracy_score(np.array(val_labels_tool_list), np.array(val_scores_tool_list))
+    print('Validation mAP:{}, Acc:{}'.format(valid_mAP, valid_acc))
     return eval_losses.avg, valid_mAP
 
 
 def main(args):
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('args.deviceargs.deviceargs.deviceargs.deviceargs.device', args.device)
     args.n_gpu = torch.cuda.device_count()
     set_seed(args)
     args, model = setup(args)

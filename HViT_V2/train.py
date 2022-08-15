@@ -206,6 +206,8 @@ def train(args, model):
                         save_model(args, model)
                         best_acc = mAP
                         best_global_step = global_step
+                    print('Cuurent mAP:{}, Best mAP:{}, Global Step(curr/best):({}/{}), lr: {}'.format(mAP, best_acc,
+                global_step, best_global_step, optimizer.param_groups[0]['lr']))
                     model.train()
                     
                 if global_step % t_total == 0:
